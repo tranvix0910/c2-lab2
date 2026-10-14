@@ -14,11 +14,11 @@ npm start       # chạy server tại http://localhost:3000
 
 ## API
 
-| Endpoint | Ví dụ | Kết quả |
-|---|---|---|
-| `GET /` | `/` | `{ "message": "Hello from C2-Lab2!", "version": "1.0.0" }` |
-| `GET /health` | `/health` | `{ "status": "ok" }` |
-| `GET /calc/:op` | `/calc/add?a=1&b=2` | `{ "result": 3 }` |
+| Endpoint        | Ví dụ               | Kết quả                                                    |
+| --------------- | ------------------- | ---------------------------------------------------------- |
+| `GET /`         | `/`                 | `{ "message": "Hello from C2-Lab2!", "version": "1.0.0" }` |
+| `GET /health`   | `/health`           | `{ "status": "ok" }`                                       |
+| `GET /calc/:op` | `/calc/add?a=1&b=2` | `{ "result": 3 }`                                          |
 
 `op` gồm: `add`, `subtract`, `multiply`, `divide`.
 
