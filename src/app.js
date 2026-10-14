@@ -20,7 +20,7 @@ function createApp() {
     }
 
     if (url.pathname === "/health") {
-      return sendJson(res, 200, { status: "ok" });
+      return sendJson(res, 200, { status: "badrequest" });
     }
 
     // Ví dụ: /calc/add?a=1&b=2
