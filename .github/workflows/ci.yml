@@ -5,36 +5,80 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # Allow manual re-runs (`gh workflow run ci.yml`) without pushing a dummy commit.
+  workflow_dispatch:
 
+# Least privilege: the job only needs to read the repository contents.
 permissions:
   contents: read
 
+# One run per branch/PR: a newer push cancels the older in-progress run.
+# PR number keeps PR runs grouped even when head/merge refs change; workflow name avoids
+# collisions with other workflows that might use the same pattern.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
+
+# Explicit shell: `bash -e -o pipefail` instead of the runner's implicit default,
+# so a failing command inside a pipe also fails the step.
+defaults:
+  run:
+    shell: bash
 
 jobs:
   build-and-test:
+    name: Lint, test and build
     runs-on: ubuntu-latest
+    # Fail fast instead of hanging for the 6-hour default if something gets stuck.
     timeout-minutes: 10
 
     steps:
       - name: Checkout
         uses: actions/checkout@v5
         with:
+          # Shallow clone is enough for lint/test/build and is the fastest option.
+          fetch-depth: 1
+          # Don't leave the GITHUB_TOKEN in .git/config; no later step needs to push.
           persist-credentials: false
 
       - name: Setup Node.js 22
         uses: actions/setup-node@v5
         with:
           node-version: 22
+          # Cache ~/.npm; the cache key is a hash of the lockfile, so any
+          # dependency change invalidates it automatically.
           cache: npm
+          cache-dependency-path: package-lock.json
 
+      # Fail early with a clear message instead of a confusing error later on.
+      - name: Verify lockfile and required npm scripts
+        run: |
+          test -f package-lock.json || { echo "::error::package-lock.json is missing (required by npm ci)"; exit 1; }
+          node -e '
+            const scripts = require("./package.json").scripts || {};
+            const missing = ["lint", "test", "build"].filter((s) => !scripts[s]);
+            if (missing.length) {
+              console.log(`::error::Missing npm scripts in package.json: ${missing.join(", ")}`);
+              process.exit(1);
+            }
+            console.log("All required npm scripts are defined.");
+          '
+
+      # npm ci: clean, reproducible install from the lockfile.
+      # --no-audit/--no-fund skip network calls that only add noise and time in CI.
       - name: Install dependencies
-        run: npm ci
+        run: npm ci --no-audit --no-fund
+
+      # Cheapest check first: catches syntax errors before running tests.
+      - name: Lint
+        run: npm run lint
 
       - name: Run tests
         run: npm test
 
       - name: Build
         run: npm run build
+
+      # Make sure the build actually produced output, not just exited 0.
+      - name: Verify build output
+        run: test -f dist/package.json && test -d dist/src
