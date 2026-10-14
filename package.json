@@ -8,10 +8,15 @@
     "pretest": "node -e \"require('node:fs').mkdirSync('test-results', { recursive: true })\"",
     "test": "node --test --test-reporter=spec --test-reporter-destination=stdout --test-reporter=junit --test-reporter-destination=test-results/junit.xml \"test/**/*.test.js\"",
     "lint": "node scripts/lint.js",
-    "build": "node scripts/build.js"
+    "build": "node scripts/build.js",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
   },
   "engines": {
     "node": ">=22"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "devDependencies": {
+    "prettier": "^3.9.10"
+  }
 }
