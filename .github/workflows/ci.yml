@@ -73,8 +73,21 @@ jobs:
       - name: Lint
         run: npm run lint
 
+      # `npm test` prints results to the log and writes a JUnit report to
+      # test-results/junit.xml (configured in package.json).
       - name: Run tests
         run: npm test
+
+      # always(): upload the report even when tests fail; that's when it matters most.
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: test-results
+          path: test-results/junit.xml
+          # Warn instead of failing if tests never ran (e.g. an earlier step failed).
+          if-no-files-found: warn
+          retention-days: 7
 
       - name: Build
         run: npm run build
