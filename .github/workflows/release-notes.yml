@@ -1,0 +1,101 @@
+name: Release Report
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  release-report:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Collect merged PR metadata
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const sha = context.sha;
+
+            const { data: prs } = await github.rest.repos.listPullRequestsAssociatedWithCommit({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              commit_sha: sha,
+            });
+
+            // Only accept a PR that was merged into main and whose merge commit is the pushed commit.
+            const pr = prs.find(p =>
+              p.merged_at !== null &&
+              p.base.ref === 'main' &&
+              p.merge_commit_sha === sha
+            );
+
+            const report = {
+              schema_version: '1.0',
+              repository: `${context.repo.owner}/${context.repo.repo}`,
+              commit_sha: sha,
+              status: pr ? 'found' : 'no_merged_pull_request',
+              pull_request: pr ? {
+                number: pr.number,
+                title: pr.title,
+                labels: pr.labels.map(l => l.name),
+                author: pr.user ? pr.user.login : null,
+                body: pr.body ?? null,
+                merge_commit_sha: pr.merge_commit_sha,
+              } : null,
+            };
+
+            fs.writeFileSync('release-report.json', JSON.stringify(report, null, 2) + '\n');
+
+            if (pr) {
+              core.info(`Found merged PR #${pr.number} for ${sha}`);
+            } else {
+              core.notice(`No merged pull request associated with ${sha}; pull_request is null.`);
+            }
+
+      - name: Generate release notes
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const report = JSON.parse(fs.readFileSync('release-report.json', 'utf8'));
+            const prs = report.pull_request ? [report.pull_request] : [];
+
+            // Fixed section order; categories come from labels only.
+            const sections = [
+              { title: 'Breaking changes', label: 'release:major' },
+              { title: 'Features',         label: 'release:minor' },
+              { title: 'Fixes',            label: 'release:patch' },
+              { title: 'Infrastructure',   label: 'area:infra' },
+            ];
+
+            const entry = pr =>
+              `- ${pr.title} (#${pr.number})` + (pr.author ? ` by @${pr.author}` : '');
+
+            const lines = ['# Release Notes', '', `Commit: ${report.commit_sha}`, ''];
+            for (const { title, label } of sections) {
+              const matches = prs
+                .filter(pr => pr.labels.includes(label))
+                .sort((a, b) => a.number - b.number);
+              lines.push(`## ${title}`, '');
+              lines.push(...(matches.length ? matches.map(entry) : ['None']));
+              lines.push('');
+            }
+
+            fs.writeFileSync('release-notes.md', lines.join('\n'));
+
+      - name: Upload release report
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-report
+          path: release-report.json
+          if-no-files-found: error
+
+      - name: Upload release notes
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-notes
+          path: release-notes.md
+          if-no-files-found: error
