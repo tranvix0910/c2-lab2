@@ -1,0 +1,19 @@
+# Prompt files are a versioned contract that the release workflow validates
+# with grep/awk. Reformatting them would decouple the prompt from its
+# validation, so Prettier must not touch them.
+ai/prompts/
+
+# Build output and generated test reports.
+dist/
+test-results/
+
+# Runtime files written by the AI workflows.
+release-report.json
+release-notes.md
+chatops-input.json
+chatops-output.md
+ai-telemetry.json
+.bedrock.*
+
+# Dependency lockfile: let npm own its formatting.
+package-lock.json

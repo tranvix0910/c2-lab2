@@ -1,0 +1,230 @@
+name: "Bedrock Converse"
+description: "Calls the Amazon Bedrock Converse API and writes the assistant message to a file."
+
+inputs:
+  model_id:
+    description: "Bedrock model ID or inference profile ID (e.g., us.anthropic.claude-sonnet-4-6)"
+    required: true
+  region:
+    description: "AWS region for the bedrock-runtime endpoint"
+    required: false
+    default: "us-east-1"
+  system_prompt_file:
+    description: "Path to system prompt text/markdown file"
+    required: true
+  user_input_file:
+    description: "Path to user input file (usually JSON)"
+    required: true
+  output_file:
+    description: "Path to write model output (markdown/text)"
+    required: false
+    default: "release-notes.md"
+  temperature:
+    description: "Model temperature (0.0-1.0). Lower is more deterministic."
+    required: false
+    default: "0.1"
+  max_tokens:
+    description: "Maximum output tokens. Must be right-sized: an oversized value silently reserves quota."
+    required: false
+    default: "1500"
+
+outputs:
+  response_path:
+    description: "Path to raw response JSON file"
+    value: ${{ steps.call.outputs.response_path }}
+  output_path:
+    description: "Path to generated output file"
+    value: ${{ steps.call.outputs.output_path }}
+  stop_reason:
+    description: "Bedrock stopReason (end_turn, max_tokens, stop_sequence, ...)"
+    value: ${{ steps.call.outputs.stop_reason }}
+  duration_seconds:
+    description: "Wall-clock duration of the successful model call in seconds"
+    value: ${{ steps.call.outputs.duration_seconds }}
+  latency_ms:
+    description: "Model-reported latency in milliseconds (from response metrics)"
+    value: ${{ steps.call.outputs.latency_ms }}
+  total_tokens:
+    description: "Total tokens used (input + output)"
+    value: ${{ steps.call.outputs.total_tokens }}
+  prompt_tokens:
+    description: "Input tokens used (Bedrock: usage.inputTokens)"
+    value: ${{ steps.call.outputs.prompt_tokens }}
+  completion_tokens:
+    description: "Output tokens used (Bedrock: usage.outputTokens)"
+    value: ${{ steps.call.outputs.completion_tokens }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Validate inputs and dependencies
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        command -v jq >/dev/null 2>&1 || (echo "jq is required but not installed." && exit 1)
+        command -v aws >/dev/null 2>&1 || (echo "AWS CLI is required but not installed." && exit 1)
+        aws --version
+
+        [[ -f "${{ inputs.system_prompt_file }}" ]] || (echo "System prompt file not found: ${{ inputs.system_prompt_file }}" && exit 1)
+        [[ -f "${{ inputs.user_input_file }}" ]] || (echo "User input file not found: ${{ inputs.user_input_file }}" && exit 1)
+        [[ -n "${{ inputs.model_id }}" ]] || (echo "Missing model_id input" && exit 1)
+        [[ -n "${{ inputs.region }}" ]] || (echo "Missing region input" && exit 1)
+        [[ -n "${{ inputs.max_tokens }}" ]] || (echo "Missing max_tokens input" && exit 1)
+
+        # Fail here with actionable guidance instead of a cryptic SDK error
+        # three retries deep inside the call loop.
+        if ! aws sts get-caller-identity --output json >/dev/null 2>&1; then
+          echo "No usable AWS credentials."
+          echo "Add aws-actions/configure-aws-credentials before this action,"
+          echo "and make sure the workflow grants 'id-token: write'."
+          exit 1
+        fi
+        echo "AWS identity: $(aws sts get-caller-identity --query Arn --output text)"
+
+    - name: Call Bedrock
+      id: call
+      shell: bash
+      env:
+        # Inner retry layer: the SDK handles throttling with a token bucket far
+        # better than a shell sleep can. The loop below is the outer layer.
+        AWS_RETRY_MODE: adaptive
+        AWS_MAX_ATTEMPTS: "3"
+      run: |
+        set -euo pipefail
+
+        PROMPT_SIZE=$(wc -c < "${{ inputs.system_prompt_file }}")
+        INPUT_SIZE=$(wc -c < "${{ inputs.user_input_file }}")
+        echo "System prompt size: ${PROMPT_SIZE} bytes"
+        echo "User input size: ${INPUT_SIZE} bytes"
+
+        MAX_INPUT_BYTES=25000
+        DURATION=0
+
+        if [ "$INPUT_SIZE" -gt "$MAX_INPUT_BYTES" ]; then
+          echo "Input exceeds ${MAX_INPUT_BYTES} bytes. Refusing to call model."
+          exit 1
+        fi
+
+        # Converse API: the system prompt is a TOP-LEVEL field, not a message
+        # with role "system". Getting this wrong yields a ValidationException.
+        # --rawfile keeps the trailing newline that $(cat ...) would strip.
+        jq -n --rawfile s "${{ inputs.system_prompt_file }}" \
+          '[{text: $s}]' > .bedrock.system.json
+
+        jq -n --rawfile u "${{ inputs.user_input_file }}" \
+          '[{role: "user", content: [{text: $u}]}]' > .bedrock.messages.json
+
+        # maxTokens is explicit on purpose. Leaving it unset makes Bedrock
+        # reserve the model's maximum output and can throttle the whole account.
+        jq -n \
+          --argjson temp "${{ inputs.temperature }}" \
+          --argjson maxt "${{ inputs.max_tokens }}" \
+          '{maxTokens: $maxt, temperature: $temp}' > .bedrock.inference.json
+
+        RESPONSE_FILE=".bedrock.response.json"
+        ERROR_FILE=".bedrock.error.txt"
+        OUTPUT_FILE="${{ inputs.output_file }}"
+
+        MAX_RETRIES=3
+        ATTEMPT=1
+        SLEEP_SECONDS=2
+
+        while true; do
+          START_TIME=$(date +%s)
+
+          set +e
+          aws bedrock-runtime converse \
+            --region "${{ inputs.region }}" \
+            --model-id "${{ inputs.model_id }}" \
+            --system file://.bedrock.system.json \
+            --messages file://.bedrock.messages.json \
+            --inference-config file://.bedrock.inference.json \
+            --output json > "$RESPONSE_FILE" 2> "$ERROR_FILE"
+          RC=$?
+          set -e
+
+          END_TIME=$(date +%s)
+          DURATION=$((END_TIME - START_TIME))
+          echo "Model call duration: ${DURATION}s"
+
+          if [ "$RC" -eq 0 ]; then
+            break
+          fi
+
+          # Retry only transient errors. ValidationException and
+          # AccessDeniedException never recover on their own, and retrying them
+          # just buries the real cause under a "failed after 3 attempts" message.
+          if grep -Eq 'ThrottlingException|ServiceUnavailableException|InternalServerException|ModelTimeoutException' "$ERROR_FILE"; then
+            if [ "$ATTEMPT" -ge "$MAX_RETRIES" ]; then
+              echo "Bedrock call failed after ${ATTEMPT} attempts (transient error):"
+              cat "$ERROR_FILE"
+              exit 1
+            fi
+            echo "Retry ${ATTEMPT}/${MAX_RETRIES} after ${SLEEP_SECONDS}s (transient)"
+            sleep "$SLEEP_SECONDS"
+            ATTEMPT=$((ATTEMPT + 1))
+            SLEEP_SECONDS=$((SLEEP_SECONDS * 2))
+            continue
+          fi
+
+          echo "Non-retryable Bedrock error (not retrying):"
+          cat "$ERROR_FILE"
+          exit 1
+        done
+
+        STOP_REASON=$(jq -r '.stopReason // "unknown"' "$RESPONSE_FILE")
+
+        jq -r '.output.message.content[0].text // empty' "$RESPONSE_FILE" > "$OUTPUT_FILE"
+        if [[ ! -s "$OUTPUT_FILE" ]]; then
+          echo "Bedrock returned empty output."
+          exit 1
+        fi
+
+        # Surfaced here because a truncated response can still satisfy the
+        # heading checks downstream and reach a release note unnoticed.
+        if [ "$STOP_REASON" = "max_tokens" ]; then
+          echo "::warning::Model output was truncated (stopReason=max_tokens). Increase max_tokens."
+        fi
+
+        PROMPT_TOKENS=$(jq -r '.usage.inputTokens // 0' "$RESPONSE_FILE")
+        COMPLETION_TOKENS=$(jq -r '.usage.outputTokens // 0' "$RESPONSE_FILE")
+        TOTAL_TOKENS=$(jq -r '.usage.totalTokens // 0' "$RESPONSE_FILE")
+        LATENCY_MS=$(jq -r '.metrics.latencyMs // 0' "$RESPONSE_FILE")
+
+        echo "Stop reason: $STOP_REASON"
+        echo "Prompt tokens: $PROMPT_TOKENS"
+        echo "Completion tokens: $COMPLETION_TOKENS"
+        echo "Total tokens: $TOTAL_TOKENS"
+        echo "Model latency: ${LATENCY_MS}ms"
+
+        # One echo per declared output. A declared output with no echo here is
+        # silently empty with no error reported.
+        echo "response_path=${RESPONSE_FILE}" >> "$GITHUB_OUTPUT"
+        echo "output_path=${OUTPUT_FILE}" >> "$GITHUB_OUTPUT"
+        echo "stop_reason=${STOP_REASON}" >> "$GITHUB_OUTPUT"
+        echo "duration_seconds=${DURATION}" >> "$GITHUB_OUTPUT"
+        echo "latency_ms=${LATENCY_MS}" >> "$GITHUB_OUTPUT"
+        echo "total_tokens=${TOTAL_TOKENS}" >> "$GITHUB_OUTPUT"
+        echo "prompt_tokens=${PROMPT_TOKENS}" >> "$GITHUB_OUTPUT"
+        echo "completion_tokens=${COMPLETION_TOKENS}" >> "$GITHUB_OUTPUT"
+
+        cat <<TELEMETRY > ai-telemetry.json
+        {
+          "timestamp": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
+          "provider": "amazon-bedrock",
+          "model_id": "${{ inputs.model_id }}",
+          "region": "${{ inputs.region }}",
+          "max_tokens": ${{ inputs.max_tokens }},
+          "prompt_size_bytes": ${PROMPT_SIZE},
+          "input_size_bytes": ${INPUT_SIZE},
+          "duration_seconds": ${DURATION},
+          "latency_ms": ${LATENCY_MS},
+          "stop_reason": "${STOP_REASON}",
+          "prompt_tokens": ${PROMPT_TOKENS},
+          "completion_tokens": ${COMPLETION_TOKENS},
+          "total_tokens": ${TOTAL_TOKENS}
+        }
+        TELEMETRY
+
+        jq . ai-telemetry.json > /dev/null || (echo "Generated telemetry is not valid JSON." && exit 1)
