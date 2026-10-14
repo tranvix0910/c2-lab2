@@ -58,7 +58,7 @@ jobs:
   dependency-review:
     name: Dependency Review
     runs-on: ubuntu-latest
-    # Only this job may comment on the PR.
+    # Comments on the PR when the review fails.
     permissions:
       contents: read
       pull-requests: write
@@ -70,3 +70,142 @@ jobs:
         uses: actions/dependency-review-action@v4
         with:
           comment-summary-in-pr: on-failure
+
+  pr-summary:
+    name: PR Summary
+    runs-on: ubuntu-latest
+    needs: [build-test, formatting-check, dependency-review]
+    # Post the summary even when an earlier job fails, but not when the run is cancelled.
+    if: ${{ !cancelled() }}
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Post or update PR summary comment
+        uses: actions/github-script@v7
+        env:
+          BUILD_TEST_RESULT: ${{ needs.build-test.result }}
+          FORMATTING_RESULT: ${{ needs.formatting-check.result }}
+          DEPENDENCY_REVIEW_RESULT: ${{ needs.dependency-review.result }}
+        with:
+          script: |
+            // Deterministic summary built only from the PR title and commit messages.
+            const MARKER = '<!-- pr-validation-summary -->';
+            const MAX_LISTED_COMMITS = 20;
+            const NOT_ENOUGH = 'Not enough information';
+
+            // Explicit keyword rules, checked against the PR title and commit messages.
+            const RULES = {
+              high: /\b(breaking|migration|migrate|security|auth|authentication|permissions?|secrets?|revert|drop|remove)\b|BREAKING CHANGE|^\w+(\(.+\))?!:/im,
+              medium: /\b(deps?|dependenc(y|ies)|upgrade|bump|refactor|config|configuration|workflow|ci|pipeline|build)\b/i,
+              infra: /\b(infra|infrastructure|workflow|ci|pipeline|actions?|docker(file)?|terraform|kubernetes|k8s|helm|cloudformation|cdk|deploy(ment)?)\b|\.github\//i,
+              tests: /\b(tests?|testing|spec)\b/i,
+              deps: /\b(deps?|dependenc(y|ies)|upgrade|bump|package(-lock)?)\b/i,
+            };
+
+            const { owner, repo } = context.repo;
+            const pr = context.payload.pull_request;
+            const title = (pr.title || '').trim();
+
+            const commits = await github.paginate(github.rest.pulls.listCommits, {
+              owner,
+              repo,
+              pull_number: pr.number,
+              per_page: 100,
+            });
+            const messages = commits.map((c) => c.commit.message.trim()).filter(Boolean);
+            const subjects = messages.map((m) => m.split('\n')[0].trim());
+
+            const hasInfo = title.length > 0 && messages.length > 0;
+            const corpus = [title, ...messages].join('\n');
+            const matches = (rule) => RULES[rule].test(corpus);
+
+            // Summary of changes
+            let summary;
+            if (!hasInfo) {
+              summary = NOT_ENOUGH;
+            } else {
+              const listed = subjects.slice(0, MAX_LISTED_COMMITS).map((s) => `- ${s}`);
+              if (subjects.length > MAX_LISTED_COMMITS) {
+                listed.push(`- ...and ${subjects.length - MAX_LISTED_COMMITS} more commit(s)`);
+              }
+              summary = [`**${title}**`, '', `Commits (${subjects.length}):`, ...listed].join('\n');
+            }
+
+            // Risk assessment: first matching rule wins.
+            let risk;
+            let riskReason;
+            if (!hasInfo) {
+              risk = NOT_ENOUGH;
+              riskReason = 'PR title or commit messages are missing.';
+            } else if (matches('high')) {
+              risk = 'High';
+              riskReason = 'Title or commits mention breaking changes, migrations, security, auth, permissions, secrets, reverts or removals.';
+            } else if (matches('medium') || subjects.length > 10) {
+              risk = 'Medium';
+              riskReason = 'Title or commits mention dependencies, refactoring, configuration or CI, or the PR has more than 10 commits.';
+            } else {
+              risk = 'Low';
+              riskReason = 'No high- or medium-risk keywords found in the title or commits.';
+            }
+
+            // Infrastructure impact
+            const infra = !hasInfo ? NOT_ENOUGH : matches('infra') ? 'Yes' : 'No';
+
+            // Testing considerations
+            const testing = [];
+            if (!hasInfo) {
+              testing.push(`- ${NOT_ENOUGH}`);
+            } else {
+              if (matches('tests')) testing.push('- Commits mention tests: confirm the new or updated tests cover the change.');
+              if (infra === 'Yes') testing.push('- Commits mention CI or infrastructure: confirm the workflow behaves as expected on this PR.');
+              if (matches('deps')) testing.push('- Commits mention dependencies: review the Dependency Review results.');
+              if (testing.length === 0) testing.push('- No specific testing considerations found in the title or commits.');
+            }
+            const result = (r) => ({ success: '✅ passed', failure: '❌ failed', skipped: '⏭️ skipped', cancelled: '🚫 cancelled' })[r] || r;
+            testing.push(
+              '',
+              '| Check | Result |',
+              '| --- | --- |',
+              `| Build & Test | ${result(process.env.BUILD_TEST_RESULT)} |`,
+              `| Formatting Check | ${result(process.env.FORMATTING_RESULT)} |`,
+              `| Dependency Review | ${result(process.env.DEPENDENCY_REVIEW_RESULT)} |`,
+            );
+
+            const body = [
+              MARKER,
+              '## PR Summary',
+              '',
+              '### Summary of changes',
+              summary,
+              '',
+              '### Risk assessment',
+              `**${risk}**: ${riskReason}`,
+              '',
+              '### Testing considerations',
+              ...testing,
+              '',
+              '### Infrastructure impact',
+              `**${infra}**`,
+              '',
+              '<sub>Generated from the PR title and commit messages using fixed rules. Changed files are not analyzed.</sub>',
+            ].join('\n');
+
+            // Update this workflow's existing comment instead of posting a new one each run.
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner,
+              repo,
+              issue_number: pr.number,
+              per_page: 100,
+            });
+            const existing = comments.find(
+              (c) => c.user?.login === 'github-actions[bot]' && c.body?.includes(MARKER),
+            );
+
+            if (existing) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+              core.info(`Updated comment ${existing.html_url}`);
+            } else {
+              const { data } = await github.rest.issues.createComment({ owner, repo, issue_number: pr.number, body });
+              core.info(`Created comment ${data.html_url}`);
+            }
