@@ -46,3 +46,5 @@ Nhãn quyết định mục nào trong release notes:
 | `area:infra`    | Infrastructure          |
 
 Release luôn ở trạng thái **draft** để người review duyệt trước khi publish.
+
+<!-- Lab 3 injection re-test: no functional change. -->
