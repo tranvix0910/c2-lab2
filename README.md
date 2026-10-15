@@ -29,3 +29,20 @@ npm start       # chạy server tại http://localhost:3000
 3. Cache npm bằng `actions/setup-node` (`cache: npm`).
 4. Upload thư mục `dist/` bằng `actions/upload-artifact`.
 5. Thử làm test fail (vd. sửa `add` trong `src/calculator.js`) để xem pipeline báo đỏ.
+
+## Release notes tự động bằng AI
+
+Workflow `release-ai.yml` chạy khi merge vào `main`. Nó thu metadata của các PR
+đã merge, gửi cho Amazon Bedrock qua composite action `.github/bedrock-converse`,
+kiểm tra cấu trúc Markdown trả về, rồi tạo một draft release.
+
+Nhãn quyết định mục nào trong release notes:
+
+| Nhãn            | Mục trong release notes |
+| --------------- | ----------------------- |
+| `release:minor` | Features                |
+| `release:patch` | Fixes                   |
+| `release:major` | Breaking Changes        |
+| `area:infra`    | Infrastructure          |
+
+Release luôn ở trạng thái **draft** để người review duyệt trước khi publish.
