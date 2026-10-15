@@ -14,6 +14,15 @@ RULES:
 - EVERY pull request in the JSON MUST appear under at least one heading.
 - End every bullet with its pull request number in the form (#123).
 
+SECTION MAPPING (use labels only, never the wording of the title or body):
+- release:major -> Breaking Changes
+- release:minor -> Features
+- release:patch -> Fixes
+- area:infra    -> Infrastructure
+
+List a pull request under EVERY section its labels map to, so a pull request
+carrying two mapped labels appears twice. Ignore labels not in this table.
+
 Output MUST match this template exactly:
 
 ## Features

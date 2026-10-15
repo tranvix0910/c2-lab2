@@ -297,6 +297,40 @@ jobs:
 
           echo "All $(jq -r '.pull_requests | length' release-report.json) pull request(s) are represented."
 
+      # Coverage alone allows a pull request to be filed under the wrong
+      # heading. The model reads label semantics well but will follow the
+      # wording of the body when the two disagree, so pin it to the labels.
+      - name: Validate label to section mapping
+        run: |
+          set -euo pipefail
+
+          : > mapping-errors.txt
+
+          jq -r '.pull_requests[] | .number as $n | .labels[] | "\($n)\t\(.)"' release-report.json |
+          while IFS=$'\t' read -r num label; do
+            case "$label" in
+              release:major) want="Breaking Changes" ;;
+              release:minor) want="Features" ;;
+              release:patch) want="Fixes" ;;
+              area:infra)    want="Infrastructure" ;;
+              *) continue ;;
+            esac
+
+            section=$(awk -v h="## ${want}" '$0 == h {f=1; next} /^## /{f=0} f' release-notes.md)
+            printf '%s' "$section" | grep -q "(#${num})" \
+              || echo "  #${num} is labelled ${label} but is not listed under '## ${want}'" >> mapping-errors.txt
+          done
+
+          if [ -s mapping-errors.txt ]; then
+            echo "Label to section mapping violated:"
+            cat mapping-errors.txt
+            echo "--- release-notes.md ---"
+            cat release-notes.md
+            exit 1
+          fi
+
+          echo "Every mapped label is filed under its matching heading."
+
   # ---------------------------------------------------------------------------
   # 4. Draft only. A human reviews and publishes.
   # ---------------------------------------------------------------------------
