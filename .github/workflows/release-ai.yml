@@ -276,6 +276,27 @@ jobs:
             END{ if (h != "" && c == 0) { print "No bullets under " h; exit 1 } }
           ' release-notes.md
 
+      # Structure alone is not enough: notes made entirely of "- None" are
+      # structurally valid but silently drop every pull request. Prompt-injected
+      # or confused output fails here instead of reaching a draft release.
+      - name: Validate pull request coverage
+        run: |
+          set -euo pipefail
+
+          missing=""
+          for n in $(jq -r '.pull_requests[].number' release-report.json); do
+            grep -q "(#${n})" release-notes.md || missing="${missing} #${n}"
+          done
+
+          if [ -n "$missing" ]; then
+            echo "Pull request(s) supplied to the model but absent from the release notes:${missing}"
+            echo "--- release-notes.md ---"
+            cat release-notes.md
+            exit 1
+          fi
+
+          echo "All $(jq -r '.pull_requests | length' release-report.json) pull request(s) are represented."
+
   # ---------------------------------------------------------------------------
   # 4. Draft only. A human reviews and publishes.
   # ---------------------------------------------------------------------------
