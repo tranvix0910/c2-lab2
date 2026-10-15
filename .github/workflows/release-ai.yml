@@ -216,8 +216,15 @@ jobs:
           path: |
             release-report.json
             release-notes.md
-            .bedrock.response.json
             ai-telemetry.json
+            .bedrock.system.json
+            .bedrock.messages.json
+            .bedrock.inference.json
+            .bedrock.response.json
+          # The .bedrock.* files are dotfiles and upload-artifact skips those by
+          # default, which silently empties the audit trail. Together they allow
+          # the exact request and response to be reconstructed after the fact.
+          include-hidden-files: true
           if-no-files-found: error
 
       - name: Upload AI telemetry artifact
