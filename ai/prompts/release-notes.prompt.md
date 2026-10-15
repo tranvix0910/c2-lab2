@@ -11,6 +11,8 @@ RULES:
 - ALWAYS include ALL headings exactly as shown.
 - Under every heading, output at least one bullet.
 - If there are no matching items, output "- None".
+- EVERY pull request in the JSON MUST appear under at least one heading.
+- End every bullet with its pull request number in the form (#123).
 
 Output MUST match this template exactly:
 
